@@ -6674,5 +6674,4 @@ def run_concurrently(worker_func, num_threads=None, args=(), kwargs=None):
     # If a worker thread raises an exception, re-raise it.
     if exc_value is not None:
         raise exc_value
-
     return results
