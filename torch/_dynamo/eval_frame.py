@@ -412,6 +412,7 @@ def _reset_guarded_backend_cache() -> None:
         if hasattr(backend, "reset"):
             backend.reset()
     cached_backends.clear()
+    _initialized_backends.clear()
 
 
 DONT_WRAP_FILES = {
@@ -1612,6 +1613,23 @@ def _optimize_catch_errors(
     )
 
 
+# Identity-set of backends whose _dynamo_backend_init has already fired. Dedup
+# is on the user-supplied backend, not the per-call wrapper, so init runs once
+# per backend object per process -- covering compile-site reuse, the
+# compiled_autograd rebuild path, and force_backend.
+_initialized_backends: weakref.WeakSet[Callable[..., Any]] = weakref.WeakSet()
+
+
+def _maybe_fire_backend_init(backend: Callable[..., Any]) -> None:
+    # Unwrap _TorchCompileWrapper so dedup keys on the backend the user handed
+    # in rather than the fresh wrapper each torch.compile() builds.
+    inner = getattr(backend, "compiler_fn", backend)
+    backend_init = getattr(inner, "_dynamo_backend_init", None)
+    if backend_init is not None and inner not in _initialized_backends:
+        _initialized_backends.add(inner)
+        backend_init()
+
+
 def get_compiler_fn(
     compiler_fn: str | Callable[..., Any] | None,
 ) -> WrapBackendDebug:
@@ -1631,6 +1649,7 @@ def get_compiler_fn(
     else:
         compiler_str = None
     compiler_fn = lookup_backend(compiler_fn)  # type: ignore[arg-type]
+    _maybe_fire_backend_init(compiler_fn)
     return wrap_backend_debug(compiler_fn, compiler_str)
 
 
@@ -1816,14 +1835,10 @@ def _optimize(
             graph faster.
             One can also provide additional context for the backend, like
             torch.jit.fuser("fuser2"), by setting the backend_ctx_ctor attribute.
-            See AOTAutogradMemoryEfficientFusionWithContext for the usage.
-            Backends can also run eager one-time initialization by defining a
-            ``_dynamo_backend_init`` attribute (a no-arg callable); it is called
-            once the backend is resolved, before backend_ctx_ctor. It is invoked
-            once per ``torch.compile()`` / ``torch._dynamo.optimize()`` call, so
-            a backend reused across multiple compiled functions is initialized
-            once per site and should be idempotent. Backends forced via
-            ``torch.compiler.set_stance(force_backend=...)`` bypass this hook.
+            Backends can also define a ``_dynamo_backend_init`` no-arg callable
+            for one-time eager initialization; it fires once per backend object
+            when the backend is resolved. See the "Eager Backend Initialization"
+            section of torch.compiler_custom_backends.md.
             - Or, a string backend name in `torch._dynamo.list_backends()`
         nopython: If True, graph breaks will be errors and there will
             be a single whole-program graph.
@@ -1880,12 +1895,6 @@ def _optimize(
         )
 
     backend = get_compiler_fn(backend)
-
-    # Allow backends to perform eager initialization (e.g., load native
-    # libraries, initialize device contexts) before the first invocation.
-    backend_init = getattr(backend, "_dynamo_backend_init", None)
-    if backend_init is not None:
-        backend_init()
 
     # Find if backend has any extra context manager
     backend_ctx_ctor = getattr(backend, "backend_ctx_ctor", null_context)
@@ -2830,12 +2839,6 @@ def _optimize_assert(
     symbolic_convert.error_on_graph_break. Can also be used for testing.
     """
     backend = get_compiler_fn(backend)
-
-    # Allow backends to perform eager initialization (e.g., load native
-    # libraries, initialize device contexts) before the first invocation.
-    backend_init = getattr(backend, "_dynamo_backend_init", None)
-    if backend_init is not None:
-        backend_init()
 
     # Find if backend has any extra context manager
     backend_ctx_ctor = getattr(backend, "backend_ctx_ctor", null_context)

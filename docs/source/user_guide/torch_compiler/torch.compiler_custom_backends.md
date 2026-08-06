@@ -118,6 +118,40 @@ my_backend = aot_autograd(fw_compiler=my_compiler)  # bw_compiler=my_compiler
 model_opt = torch.compile(model, backend=my_backend)
 ```
 
+## Eager Backend Initialization
+
+Backends that need to run one-time eager setup at `torch.compile()` time
+(e.g. loading native libraries or initializing device contexts) can define a
+`_dynamo_backend_init` attribute --- a no-arg callable that fires once the
+backend is resolved, before any invocation.
+
+```python
+def my_backend(gm, example_inputs):
+    return gm.forward
+
+def my_backend_init():
+    load_native_libs()      # runs at compile() time, before any invocation
+
+my_backend._dynamo_backend_init = my_backend_init
+
+@torch.compile(backend=my_backend)
+def fn(x):
+    return x + 1
+```
+
+The hook works whether the backend is passed directly, registered by name
+with `register_backend`, or forced via
+`torch.compiler.set_stance(force_backend=...)`. It is read off the inner
+backend object, so it is found whether it is an instance attribute or a
+class method (resolved via the MRO). When using
+`aot_autograd(fw_compiler=...)`, set the hook on the inner `fw_compiler` ---
+`AotAutograd` forwards it.
+
+The hook is called **once per backend object** per process, on both the
+normal and `fullgraph=True` paths. A backend reused across multiple
+`torch.compile()` sites is therefore initialized only once (the first time
+it is resolved); making the hook idempotent is still good practice.
+
 ## Examples
 
 ### Debugging Backend
