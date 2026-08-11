@@ -14751,6 +14751,56 @@ class TestAutogradDeviceType(TestCase):
         with self.assertRaisesRegex(RuntimeError, msg):
             torch.autograd.grad(b, a)
 
+    @parametrize(
+        "op_name",
+        [
+            "sum",
+            "sum_dim",
+            "nansum",
+            "mean",
+            "mean_dim",
+            "prod",
+            "prod_dim",
+            "cumsum",
+            "cumprod",
+        ],
+    )
+    def test_reduction_complex_dtype_arg_backward(self, device, op_name):
+        # Regression test for #192719: a complex dtype= on a real input must
+        # produce a real grad instead of tripping autograd's dtype check.
+        ops = {
+            "sum": lambda t, d: t.sum(dtype=d),
+            "sum_dim": lambda t, d: t.sum(dim=0, dtype=d),
+            "nansum": lambda t, d: t.nansum(dim=0, dtype=d),
+            "mean": lambda t, d: t.mean(dtype=d),
+            "mean_dim": lambda t, d: t.mean(dim=0, dtype=d),
+            "prod": lambda t, d: t.prod(dtype=d),
+            "prod_dim": lambda t, d: t.prod(dim=0, dtype=d),
+            "cumsum": lambda t, d: t.cumsum(0, dtype=d),
+            "cumprod": lambda t, d: t.cumprod(0, dtype=d),
+        }
+        op = ops[op_name]
+        if op_name == "nansum" and torch.device(device).type == "cpu":
+            self.skipTest("nansum CPU kernel does not support complex")
+        x = torch.rand(3, 4, device=device, dtype=torch.float64, requires_grad=True)
+        out = op(x, torch.complex128)
+        self.assertEqual(out.dtype, torch.complex128)
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")
+            out.real.sum().backward()
+        self.assertFalse(any("imaginary part" in str(w.message) for w in ws))
+        self.assertEqual(x.grad.dtype, torch.float64)
+        ref = x.detach().clone().requires_grad_()
+        op(ref.to(torch.complex128), None).real.sum().backward()
+        self.assertEqual(x.grad, ref.grad)
+        gradcheck(
+            lambda t: torch.view_as_real(op(t, torch.complex128)),
+            (x.detach().clone().requires_grad_(),),
+        )
+        widen = torch.rand(3, 4, device=device, dtype=torch.float32, requires_grad=True)
+        op(widen, torch.float64).sum().backward()
+        self.assertEqual(widen.grad.dtype, torch.float32)
+
     def test_grad_unused_input_error_message(self, device):
         for unused_idx in [0, 1]:
             x = torch.randn(10, requires_grad=True, device=device)
