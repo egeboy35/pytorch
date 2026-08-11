@@ -922,6 +922,7 @@ class TestTorchDlPack(TestCase):
         # A tensor that owns its whole storage still exports byte_offset == 0.
         self.assertEqual(from_dlpack(base).storage_offset(), 0)
 
+    @skipIfTorchDynamo("__dlpack__ doesn't work with dynamo")
     @onlyCPU
     def test_numpy_consumes_byte_offset(self, device):
         # NumPy is the reference third-party consumer: it must honor the
