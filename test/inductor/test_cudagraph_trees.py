@@ -6041,6 +6041,34 @@ if HAS_CUDA_AND_TRITON:
 
         @config.patch(implicit_fallbacks=True)
         @torch._inductor.config.patch("graph_partition", True)
+        @torch._inductor.config.patch("triton.cudagraph_or_error", True)
+        def test_graph_partition_cudagraph_or_error(self):
+            # With no cudagraphable partition, cudagraphify is never reached, so
+            # the skip has to be reported before returning early.
+            @torch.library.custom_op(
+                "mylib::cudagraph_unsafe_mul",
+                mutates_args=(),
+                tags=(torch._C.Tag.cudagraph_unsafe,),
+            )
+            def cudagraph_unsafe_mul(x: torch.Tensor) -> torch.Tensor:
+                return x * 2.0
+
+            @cudagraph_unsafe_mul.register_fake
+            def _(x):
+                return torch.empty_like(x)
+
+            def f(x):
+                return cudagraph_unsafe_mul(x)
+
+            f = torch.compile(f, mode="reduce-overhead")
+
+            # match the message: an unrelated RuntimeError would pass a bare
+            # assertRaises even when the skip goes unreported
+            with self.assertRaisesRegex(RuntimeError, "skipping cudagraphs"):
+                f(torch.randn(4, device="cuda"))
+
+        @config.patch(implicit_fallbacks=True)
+        @torch._inductor.config.patch("graph_partition", True)
         def test_graph_partition_input_layout_symints(self):
             """
             Test that partition functions receive symint args derived from input
