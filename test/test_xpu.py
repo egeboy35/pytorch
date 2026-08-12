@@ -3043,6 +3043,13 @@ def _event_handle_exporter_consumer(handle, p2c, c2p):
         c2p.put(0)
 
 
+def _event_multiprocess_child(event, p2c, c2p):
+    c2p.put(0)  # notify parent child is ready
+    p2c.get()  # wait for record in parent
+    event.synchronize()
+    c2p.put(1)  # notify parent synchronization is done
+
+
 @unittest.skipIf(not Xe2_Or_Later, "XPU IPC not available")
 @unittest.skipIf(IS_WINDOWS, "XPU IPC not available on non-Linux platforms")
 @unittest.skipIf(
@@ -3094,6 +3101,29 @@ class TestXPUMultiprocessing(TestCase):
         self.assertFalse(e0.query())
         e0.synchronize()
         self.assertTrue(e0.query())
+        p.join()
+
+    def test_event_multiprocess(self):
+        event = torch.xpu.Event(enable_timing=False, interprocess=True)
+        self.assertTrue(event.query())
+
+        ctx = mp.get_context("spawn")
+        p2c = ctx.SimpleQueue()
+        c2p = ctx.SimpleQueue()
+        p = ctx.Process(
+            target=_event_multiprocess_child,
+            args=(event, p2c, c2p),
+        )
+        p.start()
+
+        c2p.get()  # wait for until child process is ready
+        torch.xpu._sleep(200_000_000)  # spin for about 200 ms
+        event.record()
+        p2c.put(0)  # notify child event is recorded
+
+        self.assertFalse(event.query())
+        c2p.get()  # wait for synchronization in child
+        self.assertTrue(event.query())
         p.join()
 
 
