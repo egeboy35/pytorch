@@ -283,6 +283,32 @@ if [[ "$BUILD_ENVIRONMENT" != *libtorch* ]]; then
   fi
   pip_install_whl "$(echo dist/*.whl)"
 
+  # native-AOT stage 2: export DSL kernels, relink torch_cuda with them
+  # embedded, and patch the relinked library back into the wheel handed
+  # to test jobs. Needs the INSTALLED torch (kernel builders import it),
+  # which is why it runs post-install rather than inside the PEP 517
+  # build. Skips cleanly (printing why) with TORCH_NATIVE_AOT=0, on a
+  # non-CUDA build, when no toolchain targets this backend, or when no
+  # supported arch is targeted. Past those checks the DSL runtimes are
+  # required and any failure fails the build. See
+  # tools/native_aot/build_stage2.py.
+  #
+  # The DSL wheels are installed HERE rather than in
+  # .ci/docker/requirements-ci.txt: that file is shared by every image, so
+  # pinning them there put ~190 MB of CUDA-only tooling into the CPU, ROCm
+  # and XPU images -- and made capability probes lie there (a ROCm image
+  # with the wheel reports CUTLASS available, then fails cuInit).
+  # Gate on the BUILT torch's capability, not on BUILD_ENVIRONMENT: stage 2
+  # requires the runtimes whenever torch.backends.cuda.is_built() (minus
+  # ROCm), and jobs like linux-jammy-py3.12-gcc11-halide are CUDA-enabled
+  # without "cuda" in their name -- the name test skipped the install there
+  # and stage 2 then failed the build. cwd=/tmp so `python -c` imports the
+  # installed wheel, not the source torch/ tree (see _torch_probe).
+  if (cd /tmp && python -c "import sys, torch; sys.exit(0 if torch.backends.cuda.is_built() and torch.version.hip is None else 1)"); then
+    install_cutlass_dsl
+  fi
+  python tools/native_aot/build_stage2.py --wheel "$(echo dist/*.whl)"
+
   # Smoke-test tools/build_with_debinfo.py against the real build tree: it must
   # still emit a debug-rebuild plan with a -g compile and the libtorch_python
   # relink. This guards against build-system changes (e.g. a new
