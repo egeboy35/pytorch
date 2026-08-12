@@ -211,6 +211,8 @@ class TestStaticTritonLauncher(TestCase):
         with tempfile.NamedTemporaryFile(mode="wb", delete=False) as tmp_file:
             if self.device_type == "xpu":
                 binary_key = "zebin"
+            elif self.device_type == "npu":
+                binary_key = "npubin"
             else:
                 binary_key = "hsaco" if torch.version.hip else "cubin"
 
@@ -994,10 +996,10 @@ instantiate_device_type_tests(
     TestStaticTritonCompileResult, globals(), except_for="cpu", allow_xpu=True
 )
 instantiate_device_type_tests(
-    TestFastCudaLauncher, globals(), except_for="cpu", allow_xpu=True
+    TestFastCudaLauncher, globals(), only_for=("cuda",)
 )
 instantiate_device_type_tests(
-    TestFastCudaLauncherCompileResult, globals(), except_for="cpu", allow_xpu=True
+    TestFastCudaLauncherCompileResult, globals(), only_for=("cuda", "xpu"), allow_xpu=True
 )
 
 
