@@ -41,6 +41,7 @@ class NCCLCachingAllocatorHook {
   struct MemInfo {
     size_t len;
     int32_t device;
+    c10::cuda::MempoolId_t mempool_id;
   };
 
   std::mutex mutex_;

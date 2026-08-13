@@ -588,7 +588,10 @@ void ProcessGroupNCCL::detachMemoryHook() {
   NCCLCachingAllocatorHook::getInstance().deregisterComm(this);
 }
 
-void ProcessGroupNCCL::registerAddressLocked(void* addr, size_t len) {
+void ProcessGroupNCCL::registerAddressLocked(
+    void* addr,
+    size_t len,
+    c10::cuda::MempoolId_t mempool_id) {
   void* handle = nullptr;
   NCCL_CHECK(
       nccl_api_,
@@ -599,10 +602,17 @@ void ProcessGroupNCCL::registerAddressLocked(void* addr, size_t len) {
   // cannot run from the allocator hook, which fires on arbitrary threads. It
   // happens lazily in ensureSegmentWindow(), keyed by the base recorded here.
   memoryRegistrationHandles_.emplace(
-      addr, RegistrationHandle{handle, nullptr, len});
+      addr, RegistrationHandle{handle, nullptr, len, mempool_id});
 }
 
 void ProcessGroupNCCL::register_address(void* addr, size_t len) {
+  registerAddressWithPool(addr, len, {0, 0});
+}
+
+void ProcessGroupNCCL::registerAddressWithPool(
+    void* addr,
+    size_t len,
+    c10::cuda::MempoolId_t mempool_id) {
   if (nccl_comm_ == nullptr) {
     return;
   }
@@ -610,7 +620,7 @@ void ProcessGroupNCCL::register_address(void* addr, size_t len) {
   TORCH_CHECK(
       !memoryRegistrationHandles_.count(addr),
       "Memory already registered with NCCL");
-  registerAddressLocked(addr, len);
+  registerAddressLocked(addr, len, mempool_id);
 }
 
 void ProcessGroupNCCL::deregister_address(
@@ -651,6 +661,22 @@ void ProcessGroupNCCL::deregister_address(
   memoryRegistrationHandles_.erase(it);
 }
 
+bool ProcessGroupNCCL::isWindowRegistrationSegment(const void* ptr) {
+  std::lock_guard<std::mutex> lock(memory_registration_mutex_);
+  const auto target = reinterpret_cast<uintptr_t>(ptr);
+  auto it = memoryRegistrationHandles_.upper_bound(ptr);
+  if (it == memoryRegistrationHandles_.begin()) {
+    return false;
+  }
+  --it;
+  const auto base = reinterpret_cast<uintptr_t>(it->first);
+  if (target < base || target - base >= it->second.len) {
+    return false;
+  }
+  return it->second.mempool_id != c10::cuda::MempoolId_t{0, 0} &&
+      isNcclAllocatorSegment(it->first, it->second.len);
+}
+
 std::pair<ncclWindow_t, size_t> ProcessGroupNCCL::lookupSegmentWindow(
     const void* ptr) {
   std::lock_guard<std::mutex> lock(memory_registration_mutex_);
@@ -663,7 +689,8 @@ std::pair<ncclWindow_t, size_t> ProcessGroupNCCL::lookupSegmentWindow(
   }
   --it;
   const auto base = reinterpret_cast<uintptr_t>(it->first);
-  if (target >= base + it->second.len || it->second.winHandle == nullptr) {
+  if (target < base || target - base >= it->second.len ||
+      it->second.winHandle == nullptr) {
     return {nullptr, 0};
   }
   return {it->second.winHandle, target - base};
@@ -681,7 +708,7 @@ ncclResult_t ProcessGroupNCCL::ensureSegmentWindow(const void* ptr) {
   }
   --it;
   const auto base = reinterpret_cast<uintptr_t>(it->first);
-  if (target >= base + it->second.len) {
+  if (target < base || target - base >= it->second.len) {
     return ncclInvalidArgument;
   }
   if (it->second.winHandle != nullptr) {
@@ -765,7 +792,7 @@ void ProcessGroupNCCL::registerMemPool(at::cuda::MemPool* pool, bool symm) {
       // ones it could not reach (allocated while the comm was down, or
       // deregistered by an earlier deregisterMemPool) are left to do here.
       if (!memoryRegistrationHandles_.count(addr)) {
-        registerAddressLocked(addr, segment.total_size);
+        registerAddressLocked(addr, segment.total_size, pool->id());
       }
     }
     if (!symm) {

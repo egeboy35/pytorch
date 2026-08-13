@@ -77,7 +77,11 @@ void NCCLCachingAllocatorHook::registerMemPreHook() {
     // NOLINTNEXTLINE(performance-no-int-to-ptr)
     void* addr = reinterpret_cast<void*>(segmentInfo.address);
     registeredMemMap_.emplace(
-        addr, MemInfo{segmentInfo.total_size, segmentInfo.device});
+        addr,
+        MemInfo{
+            segmentInfo.total_size,
+            segmentInfo.device,
+            segmentInfo.owner_private_pool_id});
   }
 }
 
@@ -94,9 +98,9 @@ void NCCLCachingAllocatorHook::regDeregMem(
     size_t len = te.size_;
     TORCH_CHECK(
         !registeredMemMap_.count(addr), "Memory already registered with NCCL");
-    registeredMemMap_.emplace(addr, MemInfo{len, te.device_});
+    registeredMemMap_.emplace(addr, MemInfo{len, te.device_, te.mempool_});
     for (auto* comm : commsForDevice(registeredComms_, te.device_)) {
-      comm->register_address(addr, len);
+      comm->registerAddressWithPool(addr, len, te.mempool_);
     }
   } else if (
       te.action_ ==
@@ -117,7 +121,7 @@ void NCCLCachingAllocatorHook::registerComm(ProcessGroupNCCL* comm) {
   TORCH_CHECK(!registeredComms_.count(comm), "Communicator already registered");
   for (const auto& [addr, mem_info] : registeredMemMap_) {
     if (mem_info.device == comm->getDevice().index()) {
-      comm->register_address(addr, mem_info.len);
+      comm->registerAddressWithPool(addr, mem_info.len, mem_info.mempool_id);
     }
   }
   registeredComms_.insert(comm);

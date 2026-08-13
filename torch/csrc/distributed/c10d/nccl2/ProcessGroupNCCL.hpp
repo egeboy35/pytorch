@@ -30,6 +30,7 @@
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAEvent.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 #include <nccl.h>
@@ -44,6 +45,8 @@
 #include <torch/csrc/distributed/c10d/nccl2/WorkNCCL.hpp>
 
 namespace c10d::nccl2 {
+
+class NCCLCachingAllocatorHook;
 
 // Hint key names for NCCL backend configuration
 constexpr std::string_view kHintMaxEventPoolSize = "max_event_pool_size";
@@ -295,6 +298,10 @@ class TORCH_API ProcessGroupNCCL : public ::c10d::Backend {
   // over the surviving/new members. Implemented in
   // ReconfigureNCCL.cpp.
   bool supportsReconfigure() const override {
+    // RCCL 2.30.4 transfers init jobs from ncclAsyncJobs to
+    // groupJob->asyncJobs, then checks the emptied source queue and takes the
+    // blocking path. Keep ROCm disabled until blocking=0 returns promptly and
+    // test_reconfigure_timeout_is_retryable passes.
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2, 28, 0) && !defined(USE_ROCM)
     return true;
 #else
@@ -334,6 +341,8 @@ class TORCH_API ProcessGroupNCCL : public ::c10d::Backend {
   // Returns {window handle, byte offset of ptr within the segment}, or
   // {nullptr, 0} if ptr is not inside a window-registered segment.
   std::pair<ncclWindow_t, size_t> lookupSegmentWindow(const void* ptr);
+  // Returns true when ptr belongs to a private NCCL mempool segment.
+  bool isWindowRegistrationSegment(const void* ptr);
   // Registers the segment containing ptr as a NCCL_WIN_COLL_SYMMETRIC window
   // if it is not one already. Collective: all ranks must call it together.
   ncclResult_t ensureSegmentWindow(const void* ptr);
@@ -370,6 +379,7 @@ class TORCH_API ProcessGroupNCCL : public ::c10d::Backend {
     return timing_enabled_.load();
   }
 
+  friend class NCCLCachingAllocatorHook;
   friend class WorkNCCL;
   friend class WindowNCCL;
 
@@ -679,6 +689,7 @@ class TORCH_API ProcessGroupNCCL : public ::c10d::Backend {
     void* regHandle{nullptr};
     ncclWindow_t winHandle{nullptr};
     size_t len{0};
+    c10::cuda::MempoolId_t mempool_id{0, 0};
   };
   std::map<void*, RegistrationHandle, std::less<>> memoryRegistrationHandles_;
   // Guards memoryRegistrationHandles_ and registeredMemPools_:
@@ -690,9 +701,17 @@ class TORCH_API ProcessGroupNCCL : public ::c10d::Backend {
   // ncclCommMemPoolMap). The symm mode is not tracked: a segment carries its
   // own window handle, so teardown does not need to be told which mode to use.
   std::set<c10::cuda::MempoolId_t> registeredMemPools_;
+  void registerAddressWithPool(
+      void* addr,
+      size_t len,
+      c10::cuda::MempoolId_t mempool_id);
+  bool isNcclAllocatorSegment(const void* ptr, size_t len) const;
   // Caller must hold memory_registration_mutex_ and have checked that `addr`
   // is not already registered.
-  void registerAddressLocked(void* addr, size_t len);
+  void registerAddressLocked(
+      void* addr,
+      size_t len,
+      c10::cuda::MempoolId_t mempool_id);
 
   // Abort hooks (c10d::Backend API; storage was in torchcomms' TorchCommBackend
   // base, folded in here). Guarded because the watchdog thread fires them while
