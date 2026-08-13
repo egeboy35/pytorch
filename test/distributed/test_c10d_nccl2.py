@@ -24,12 +24,10 @@ from torch.testing._internal.common_distributed import (
     skip_if_lt_x_gpu,
 )
 from torch.testing._internal.common_utils import (
-    getRocmVersion,
     IS_FBCODE,
     IS_SANDCASTLE,
     run_tests,
     TEST_CUDA,
-    TEST_WITH_ROCM,
     TestCase,
 )
 
@@ -734,11 +732,6 @@ class ProcessGroupNCCL2ExpandableSegmentsTest(MultiProcContinuousTest):
 
     @requires_nccl()
     @skip_if_lt_x_gpu(2)
-    @unittest.skipIf(
-        TEST_WITH_ROCM and getRocmVersion() == (7, 14),
-        "HIP 7.14 corrupts this expandable-segment in-place all_gather; "
-        "HIP 7.15 passes",
-    )
     def test_large_in_place_all_gather(self) -> None:
         numel = 16 * 1024 * 1024
         output = torch.empty(
