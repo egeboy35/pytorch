@@ -246,6 +246,19 @@ class AOTTestCase(TestCase):
                     self.assertTensorMetadataEqual(actual_inner, expected_inner)
 
 
+# Module-level `@torch.fx.wrap`ed helper for
+# `test_saved_tensors_hooks_gm_data_dependent_probe`. `torch.fx.wrap`
+# requires module scope.
+@torch.fx.wrap
+def _il_log_tensor_stats_for_regression(t, name):
+    try:
+        if torch.all(torch.isfinite(t)):
+            pass
+    except Exception:
+        pass
+    return t
+
+
 class TestPythonKey(AOTTestCase):
     def test_make_fx(self, device):
         def f(x):
@@ -4920,6 +4933,34 @@ def forward(self, tangents_1):
                     y.sum().backward()
             except torch._dynamo.exc.BackendCompilerFailed as e:
                 raise e.inner_exception from e
+
+    @torch._functorch.config.patch(saved_tensors_hooks_filtering_mode="no_static")
+    def test_saved_tensors_hooks_gm_data_dependent_probe(self):
+        # Regression: pack GraphModule bodies that allocate a fresh unbacked
+        # SymInt (e.g. via `.item()` / `bool(<fake_tensor>)` / nonzero) used
+        # to leak into `pending_fresh_unbacked_symbols` because
+        # `maybe_inline_graph_saved_tensors_hooks` ran the hook without a
+        # ProxyTorchDispatchMode, leaving no tracker to bind the symbol.
+
+        def pack(x):
+            x = _il_log_tensor_stats_for_regression(x, "in")
+            return _il_log_tensor_stats_for_regression(x, "out")
+
+        def unpack(x):
+            return x
+
+        def fn(x, w):
+            return torch.matmul(x, w).sin()
+
+        pack_gm, unpack_gm = saved_tensors_hooks_to_gm(
+            pack, unpack, "pack_hash", "unpack_hash"
+        )
+        x = torch.randn(8, 16, requires_grad=True)
+        w = torch.randn(16, 16, requires_grad=True)
+        compiled = torch.compile(fn, backend="aot_eager", fullgraph=True)
+        with torch.autograd.graph.saved_tensors_hooks(pack_gm, unpack_gm):
+            out = compiled(x, w)
+            out.sum().backward()
 
     def test_mark_activations_dynamic_with_nested(self):
         # The flattened tensors of the nested tensor aren't
